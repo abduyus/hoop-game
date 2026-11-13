@@ -1044,8 +1044,6 @@ function onlineTick(dt){
   else if(NET.found&&NET.conn&&!NET.conn.open&&performance.now()-NET.joinAt>12000){netEnd('Could not connect to your friend. Please try again.');}
  }else if(NET.role==='host'&&O.stage==='hosting'&&NET.conn&&NET.conn.open){
   NET.missT=0;
- }else if(NET.role==='host'&&O.stage==='hosting'&&NET.conn&&!NET.conn.open){
-  NET.missT+=(dt||1/120);if(NET.missT>3){netEnd('Your friend left the game.');}
  }
 }
 function netIntent(p){
