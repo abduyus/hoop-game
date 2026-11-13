@@ -20,7 +20,6 @@ body.touch.playing .tb{display:flex}
 <div class="tb" id="tJ" style="right:14px;bottom:176px">JUMP</div>
 <div class="tb" id="tS" style="right:102px;bottom:100px">SKILL</div>
 <div class="tb" id="tF" style="right:14px;bottom:76px;width:84px;height:84px;background:rgba(55,224,106,.25)">SHOOT</div>
-<script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js"></script>
 <script>
 (()=>{
 'use strict';
@@ -52,7 +51,7 @@ const POWERS=[
  {id:'fire',key:5,name:'ON FIRE',desc:'Every bucket is worth +1',col:'#ff6a2b',ch:'3 IN A ROW',goal:3,ev:'streak'}
 ];
 const POWER_DUR=14;
-const NET0=()=>({role:null,room:null,code:'',peerId:null,peer:null,conn:null,gin:null,gl:null,lin:{mx:0,sh:0,j:0,sd:0,su:0,a:0,pu:[0,0,0,0,0],rm:null},evs:[],evId:0,lastEv:-1,seq:0,lastSeq:-1,lastSnapAt:0,lastSend:0,lastInJ:'',lcs:0,frz:null,gch:0,joinAt:0,missT:0,found:false,closing:false});
+const NET0=()=>({role:null,room:null,code:'',peerId:null,gin:null,gl:null,lin:{mx:0,sh:0,j:0,sd:0,su:0,a:0,pu:[0,0,0,0,0],rm:null},evs:[],evId:0,lastEv:-1,seq:0,lastSeq:-1,lastSnapAt:0,lastSend:0,lastInJ:'',lcs:0,frz:null,gch:0,joinAt:0,missT:0,found:false});
 let NET=NET0(),netMute=0;
 const ME=()=>NET.role==='guest'?1:0;
 const lab=i=>i===ME()?'YOU':(NET.role?'FRIEND':'CPU');
@@ -764,8 +763,9 @@ function update(dt){
  if(screen==='menu'){M.t+=dt;updateFX(dt);clearEdges();return;}
  if(screen==='online'){M.t+=dt;onlineTick(dt);updateFX(dt);clearEdges();return;}
  if(NET.role==='guest'){guestUpdate(dt);return;}
- if(NET.role==='host'&&G&&NET.conn){
-  if(NET.conn.open){NET.missT=0;}
+ if(NET.role==='host'&&G&&NET.room){
+  const pr=NET.room.peers().find(p=>p.peer===NET.peerId);
+  if(pr){NET.missT=0;if(pr.presence&&pr.presence.in&&typeof pr.presence.in==='object')NET.gin=pr.presence.in;}
   else{NET.missT+=dt;if(NET.missT>3){netEnd('Your friend left the game.');return;}}
  }
  if(screen!=='play'){if(G)G.overT+=dt;updateFX(dt);clearEdges();return;}
@@ -959,100 +959,61 @@ function drawMenu(){
 
 
 // ====================== ONLINE ======================
-let roomState='connecting';
+let ROOM=null,roomState='connecting',NET_KIND='claude';
+// ---- Peer-to-peer transport (used anywhere outside Claude, e.g. Netlify) ----
+const PEER_PREFIX='streethoops1v1-';
+function loadPeerJS(){return new Promise((res,rej)=>{if(window.Peer)return res();const sc=document.createElement('script');sc.src='https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js';sc.onload=()=>window.Peer?res():rej();sc.onerror=()=>rej();document.head.appendChild(sc);});}
+const peerRoom={join(name,role){return new Promise((resolve,reject)=>{
+ const opts=window.__PEER_OPTS||{debug:0};const code=String(name).replace(/^hoops-/,'');
+ let mine={},other=null,otherAt=0,conn=null,done=false;
+ const peer=role==='host'?new Peer(PEER_PREFIX+code,opts):new Peer(opts);
+ const attach=c=>{conn=c;c.on('data',d=>{if(d&&typeof d==='object'&&!Array.isArray(d)){other=d;otherAt=performance.now();}});c.on('open',()=>{try{c.send(mine);}catch(e){}});c.on('close',()=>{if(conn===c){conn=null;other=null;}});c.on('error',()=>{});};
+ if(role==='host')peer.on('connection',c=>{
+  if(conn&&conn.open&&other){c.on('open',()=>{try{c.send({role:'full'});}catch(e){}setTimeout(()=>{try{c.close();}catch(e){}},800);});return;}
+  attach(c);});
+ const api={name,
+  presence(patch){for(const k in patch){if(patch[k]===null)delete mine[k];else mine[k]=patch[k];}if(conn&&conn.open){try{conn.send(mine);}catch(e){}}return Promise.resolve();},
+  peers(){const a=[{peer:peer.id||'me',isMe:true,sameTab:true,kind:'viewer',guest:false,by:null,presence:mine}];
+   if(conn&&conn.open&&other&&performance.now()-otherAt<5000)a.push({peer:conn.peer,isMe:false,sameTab:false,kind:'viewer',guest:false,by:null,presence:other});return a;},
+  leave(){try{if(conn)conn.close();}catch(e){}try{peer.destroy();}catch(e){}return Promise.resolve();}};
+ peer.on('open',()=>{if(role!=='host')attach(peer.connect(PEER_PREFIX+code,{serialization:'json',reliable:true}));if(!done){done=true;resolve(api);}});
+ peer.on('error',e=>{if(!done){done=true;try{peer.destroy();}catch(x){}reject({code:e&&e.type==='unavailable-id'?'code_taken':'network'});}});
+ setTimeout(()=>{if(!done){done=true;try{peer.destroy();}catch(x){}reject({code:'timeout'});}},12000);
+});}};
+function usePeer(){NET_KIND='peer';loadPeerJS().then(()=>{ROOM=peerRoom;roomState='ready';},()=>{roomState='none';});}
 function initRoom(tries){
- if(window.Peer){roomState='ready';return;}
- if(tries>0)setTimeout(()=>initRoom(tries-1),400);
- else roomState='none';
+ try{if(window.claude&&typeof window.claude.use==='function'){window.claude.use('room').then(r=>{if(r){ROOM=r;roomState='ready';}else usePeer();},()=>usePeer());return;}}catch(e){}
+ if(tries>0)setTimeout(()=>initRoom(tries-1),400);else usePeer();
 }
-initRoom(15);
+initRoom(5);
 const O={stage:'choose',typed:'',msg:''};
 function openOnline(){screen='online';O.stage='choose';O.typed='';}
-function netLeave(){
- const c=NET.conn,p=NET.peer;
- NET.closing=true;
- try{if(c&&typeof c.close==='function')c.close();}catch(e){}
- try{if(p&&typeof p.destroy==='function')p.destroy();}catch(e){}
- NET=NET0();document.body.classList.remove('playing');
-}
+function netLeave(){try{if(NET.room)NET.room.leave().catch(()=>{});}catch(e){}NET=NET0();document.body.classList.remove('playing');}
 function netEnd(msg){netLeave();screen='online';O.stage='msg';O.msg=msg;}
 function resetGl(){const g=NET.gin||{},n=v=>typeof v==='number'?v:0;NET.gl={j:n(g.j),sd:n(g.sd),su:n(g.su),a:n(g.a),pu:[0,1,2,3,4].map(i=>Array.isArray(g.pu)?n(g.pu[i]):0)};}
-function bindConn(c){
- NET.conn=c;
- c.on('data',m=>handleNetMsg(m));
- c.on('close',()=>{if(!NET.closing)netEnd('Your friend left the game.');});
- c.on('error',()=>{if(!NET.closing)netEnd('Online connection failed. Please reconnect.');});
-}
-function handleNetMsg(m){
- if(!m||typeof m!=='object')return;
- if(m.t==='in'&&NET.role==='host'){
-  const gi=m.in;
-  if(gi&&typeof gi==='object')NET.gin=gi;
- }else if(m.t==='intro'&&NET.role==='host'){
-  NET.peerId=NET.conn?NET.conn.peer:null;
-  NET.gch=clamp((m.ch|0),0,3);
-  if(m.in&&typeof m.in==='object')NET.gin=m.in;
-  if(O.stage==='hosting')startMatch();
- }else if(m.t==='snap'&&NET.role==='guest'){
-  NET.found=true;NET.lastSnapAt=performance.now();
-  if(m.s&&typeof m.s==='object'&&guestApply(m.s)){screen=m.s.sc?'over':'play';document.body.classList.add('playing');}
- }
-}
-function makePeer(id){
- return new Promise((resolve,reject)=>{
-  if(!window.Peer){reject(new Error('peerjs-missing'));return;}
-  const opts={
-   debug:1,
-   host:'0.peerjs.com',
-   port:443,
-   path:'/',
-   secure:true,
-   config:{iceServers:[{urls:'stun:stun.l.google.com:19302'},{urls:'stun:global.stun.twilio.com:3478'}]}
-  };
-  const peer=id?new window.Peer('hoops-'+id,opts):new window.Peer(opts);
-  let done=false;
-  const finish=(ok,val)=>{if(done)return;done=true;ok?resolve(val):reject(val);};
-  peer.on('open',()=>finish(true,peer));
-  peer.on('error',err=>finish(false,err));
- });
-}
-async function hostGame(){
- if(roomState!=='ready')return;
- O.stage='connecting';
- const code=String(1000+Math.floor(Math.random()*9000));
- try{
-  const peer=await makePeer(code);
-  NET=NET0();NET.role='host';NET.code=code;NET.peer=peer;
-  peer.on('connection',c=>{if(NET.conn&&NET.conn.open){c.close();return;}bindConn(c);});
-  peer.on('error',()=>{if(!NET.closing)netEnd('Online connection failed. Please reconnect.');});
-  peer.on('disconnected',()=>{if(!NET.closing)netEnd('Lost connection. Please reconnect.');});
-  O.stage='hosting';
- }catch(e){O.stage='msg';O.msg='Could not create a game ('+((e&&e.type)||'error')+'). Please try again.';}
+async function hostGame(tries){
+ if(!ROOM)return;tries=tries||0;O.stage='connecting';const code=String(1000+Math.floor(Math.random()*9000));
+ try{const r=await ROOM.join('hoops-'+code,'host');NET=NET0();NET.role='host';NET.room=r;NET.code=code;
+  r.presence({role:'host',ch:M.ch,mode:M.mode}).catch(()=>{});O.stage='hosting';}
+ catch(e){if(e&&e.code==='code_taken'&&tries<4)return hostGame(tries+1);O.stage='msg';O.msg='Could not create a game ('+((e&&e.code)||'error')+'). Please try again.';}
 }
 async function joinGame(code){
- if(roomState!=='ready'||!/^\d{4}$/.test(code))return;
- O.stage='connecting';
- try{
-  const peer=await makePeer();
-  NET=NET0();NET.role='guest';NET.code=code;NET.peer=peer;NET.joinAt=performance.now();
-  const conn=peer.connect('hoops-'+code,{reliable:true});
-  bindConn(conn);
-  conn.on('open',()=>{
-   NET.found=true;NET.peerId='hoops-'+code;
-   conn.send({t:'intro',ch:M.ch,in:NET.lin});
-  });
-  peer.on('error',()=>{if(!NET.closing)netEnd('Could not join game '+code+'.');});
-  peer.on('disconnected',()=>{if(!NET.closing)netEnd('Lost connection to your friend.');});
- }catch(e){O.stage='msg';O.msg='Could not join ('+((e&&e.type)||'error')+'). Please try again.';}
+ if(!ROOM||!/^\d{4}$/.test(code))return;O.stage='connecting';
+ try{const r=await ROOM.join('hoops-'+code,'guest');NET=NET0();NET.role='guest';NET.room=r;NET.code=code;NET.joinAt=performance.now();
+  r.presence({role:'guest',ch:M.ch,in:NET.lin}).catch(()=>{});}
+ catch(e){O.stage='msg';O.msg='Could not join ('+((e&&e.code)||'error')+'). Please try again.';}
 }
-function onlineTick(dt){
- if(NET.role==='guest'){
-  const t=performance.now()-NET.joinAt;
-  if(!NET.found&&NET.conn&&NET.conn.open)NET.found=true;
-  if(!NET.found&&t>25000){netEnd('Could not connect to game '+NET.code+'. Double-check the code and make sure your friend is still on the host screen.');}
-  else if(NET.found&&NET.conn&&!NET.conn.open&&t>30000){netEnd('Could not connect to your friend. Please try again.');}
- }else if(NET.role==='host'&&O.stage==='hosting'&&NET.conn&&NET.conn.open){
-  NET.missT=0;
+function hostPeer(){return NET.room?NET.room.peers().find(p=>!p.isMe&&p.presence&&p.presence.role==='host'):null;}
+function onlineTick(){
+ if(!NET.room)return;
+ if(NET.role==='host'&&O.stage==='hosting'){
+  const g=NET.room.peers().find(p=>!p.isMe&&p.presence&&p.presence.role==='guest');
+  if(g){NET.peerId=g.peer;NET.gch=clamp((g.presence.ch|0),0,3);NET.gin=(g.presence.in&&typeof g.presence.in==='object')?g.presence.in:null;startMatch();}
+ }else if(NET.role==='guest'){
+  if(NET.room.peers().some(p=>!p.isMe&&p.presence&&p.presence.role==='full')){netEnd('That game already has two players.');return;}
+  const h=hostPeer();
+  if(h){NET.found=true;NET.peerId=h.peer;const sn=h.presence.s;if(sn&&typeof sn==='object'){if(guestApply(sn)){screen=sn.sc?'over':'play';document.body.classList.add('playing');}}}
+  else if(performance.now()-NET.joinAt>10000){netEnd('No game found with code '+NET.code+'. Check the code, and that your friend is on the "waiting for your friend" screen.');}
  }
 }
 function netIntent(p){
@@ -1068,23 +1029,23 @@ const STS=['idle','skill','dunk'],PHS=['tip','inbound','live','scored'],STK=['at
 const r1=v=>Math.round(v*10)/10,r3=v=>Math.round(v*1000)/1000;
 function snapP(p){return [r1(p.x),r1(p.h),r1(p.vx),r1(p.vh),p.dir,p.ball?1:0,Math.max(0,STS.indexOf(p.state)),p.charging?1:0,r3(p.meter),r3(p.chargeT),p.pend?1:0,r3(p.stunT),p.stunFx||0,p.skill?[p.skill.k,r3(p.skill.t),p.skill.dur]:0,p.dunk?r3(p.dunk.t):-1,r3(p.stealT),r3(p.followT),r3(p.celT),r3(p.land),r3(p.openT),p.active?[p.active.id,r1(p.active.t)]:0,p.inv.map(x=>x||0),POWERS.map(w=>p.prog[w.id]),p.score,STK.map(k=>p.st[k]),p.ci];}
 function netSend(){
- if(!NET.conn||!NET.conn.open)return;
  const b=G.ball;
  const s={q:++NET.seq,sc:screen==='over'?1:0,gp:NET.peerId,
   g:[PHS.indexOf(G.phase),r3(G.phaseT),r3(G.sc),G.poss,G.winner,G.lastScorer,G.mode==='super'?1:0,G.target,r3(G.netSwing[0]),r3(G.netSwing[1]),r3(G.rimShake[0]),r3(G.rimShake[1]),r1(G.shake),r3(G.flash),r1(G.helpT)],
   p:G.p.map(snapP),b:[b.state==='held'?1:0,b.owner,r1(b.x),r1(b.y),r1(b.vx),r1(b.vy),b.shotActive?1:0,b.noRim?1:0,b.scored?1:0,b.hoop],e:NET.evs.slice()};
  const enc=new TextEncoder();
  while(enc.encode(JSON.stringify(s)).length>3600&&s.e.length)s.e.shift();
- NET.conn.send({t:'snap',s});
+ NET.room.presence({s}).catch(()=>{});
 }
 function netFrame(ts){
- if(!NET.conn)return;
+ if(!NET.room)return;
  if(NET.role==='host'&&G&&NET.peerId&&(screen==='play'||screen==='over')&&ts-NET.lastSend>=30){NET.lastSend=ts;netSend();}
- if(NET.role==='guest'&&NET.conn.open){const j=JSON.stringify(NET.lin);if(j!==NET.lastInJ||ts-NET.lastSend>400){NET.lastInJ=j;NET.lastSend=ts;NET.conn.send({t:'in',in:NET.lin});}}
+ if(NET.role==='guest'){const j=JSON.stringify(NET.lin);if(j!==NET.lastInJ||ts-NET.lastSend>400){NET.lastInJ=j;NET.lastSend=ts;NET.room.presence({in:NET.lin}).catch(()=>{});}}
 }
 function guestApply(sn){
  try{
   if(typeof sn.q!=='number'||sn.q===NET.lastSeq)return !!G;
+  if(sn.gp&&NET.room){const me=NET.room.peers().find(p=>p.isMe&&p.sameTab);if(me&&me.peer!==sn.gp){netEnd('That game already has two players.');return false;}}
   NET.lastSeq=sn.q;NET.lastSnapAt=performance.now();
   const hc=clamp(sn.p[0][25]|0,0,3),gc=clamp(sn.p[1][25]|0,0,3),mode=sn.g[6]?'super':'classic';
   if(!G||G.p[0].ci!==hc||G.p[1].ci!==gc||G.mode!==mode){G=newG(hc,gc,mode,1);G.p[1].human=true;FX.length=0;POPS.length=0;}
@@ -1115,7 +1076,8 @@ function applyEv(e){
  }catch(err){}
 }
 function guestUpdate(dt){
- if(NET.conn&&NET.conn.open)NET.missT=0;
+ const h=hostPeer();
+ if(h){NET.missT=0;const sn=h.presence.s;if(sn&&typeof sn==='object')guestApply(sn);}
  else{NET.missT+=dt;if(NET.missT>3){netEnd('Your friend left the game.');return;}}
  if(!G||(screen!=='play'&&screen!=='over')){clearEdges();return;}
  if(performance.now()-NET.lastSnapAt>6000){netEnd('Lost connection to your friend.');return;}
@@ -1173,7 +1135,7 @@ function drawOnline(){
    panel(240,170,800,300);
    txt(roomState==='connecting'?'Connecting to online play…':'Online play isn’t available here',W/2,230,32,'#ffd23f','center',900);
    if(roomState==='none'){
-    ['Could not load the realtime multiplayer library (PeerJS).','Check your internet connection and refresh the page.','If your school/work network blocks peer connections, try a different network.'].forEach((l,i)=>txt(l,W/2,300+i*34,18,'#dfe5ff','center',700));
+    (NET_KIND==='peer'?['Couldn’t load online play.','Check your internet connection and reload the page.']:['Open the game from its Claude link while signed in to Claude.','Your friend must be signed in to Claude too, and you need to share the game','with them first (use the Share button on the game’s Claude page).']).forEach((l,i)=>txt(l,W/2,300+i*34,18,'#dfe5ff','center',700));
    }
   }else{
    btn('CREATE A GAME',180,170,420,150,'#37e06a',()=>hostGame(),false);
@@ -1183,7 +1145,7 @@ function drawOnline(){
   }
   panel(180,390,920,200);
   txt('HOW IT WORKS',W/2,420,16,'#ffd23f','center',900);
-  ['1.  Open this same game URL on both devices.',
+  [NET_KIND==='peer'?'1.  Send your friend the link to this game. No accounts or logins needed.':'1.  Share this game with your friend (Share button on the game’s Claude page). They need a Claude account.',
    '2.  One of you clicks CREATE A GAME and tells the other the 4-digit code.',
    '3.  The other clicks JOIN A GAME and types the code. The match starts as soon as they join.',
    '4.  Keep the game tab open and on screen while you play.'].forEach((l,i)=>txt(l,200,458+i*32,16,'#dfe5ff','left',700));
